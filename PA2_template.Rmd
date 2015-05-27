@@ -1,0 +1,507 @@
+---
+title: "Peer Assessment 2 - NOAA Storm Weather Event Analysis"
+date: "Thursday, May 21, 2015"
+output: html_document
+---
+##Synopsis:
+Load in the NOAA data set of storm events reported between 1950-2011, clean and tidy the data and determine the events with the highest economic and population health impact across the United States.  Tornados and Floods were determined to be the storm events with the most health and economic impact respectively.  Excessive Heat and Hurricanes had the most health and economic impact on average per reported incident.
+
+Assignment
+
+*The basic goal of this assignment is to explore the NOAA Storm Database and answer some basic questions about severe weather events. You must use the database to answer the questions below and show the code for your entire analysis. Your analysis can consist of tables, figures, or other summaries. You may use any R package you want to support your analysis.*
+
+Questions
+
+Your data analysis must address the following questions:
+
+  1. *Across the United States, which types of events (as indicated in the EVTYPE variable) are most harmful with respect to population health?*
+
+  2. *Across the United States, which types of events have the greatest economic consequences?*
+
+*Consider writing your report as if it were to be read by a government or municipal manager who might be responsible for preparing for severe weather events and will need to prioritize resources for different types of events. However, there is no need to make any specific recommendations in your report.*
+
+##Data Processing:
+
+  1. Load in the data set from the NOAA website
+  2. Clean up the data
+  3. Subset the data to contain the desired records
+  3. Summarize and organize the data for analysis
+
+Read in the raw data, clean it up and subset it to contain the records that will be analysed later.
+
+Loading and cleaning:
+
+```{r, cache=TRUE, echo=TRUE, warning=FALSE}
+require(lubridate)
+##Cache this time consuming loading and reading of the data
+dataFile <- "./data/stormData.csv.bz2"
+
+##If file insn't in working directory download it, else read it in
+if (!file.exists(dataFile)) {
+  
+  download.file("http://d396qusza40orc.cloudfront.net/repdata%2Fdata%2FStormData.csv.bz2", dest="./data/stormData.csv.bz2")
+  
+}
+
+raw.storm.data <- read.csv("./data/stormData.csv.bz2", header=TRUE, sep=",",strip.white=TRUE, stringsAsFactors=FALSE)
+
+##convert date columns to data types
+raw.storm.data$BGN_DATE <- as.POSIXct(strptime(raw.storm.data$BGN_DATE,"%m/%d/%Y"))
+```
+
+##Subsetting:
+
+The storm data is downloaded from the NOAA website [URL](https://d396qusza40orc.cloudfront.net/repdata%2Fdata%2FStormData.csv.bz2) and a table is created containing 902,297 observations and 37 columns.  After consulting the online documentation, [URL](http://www.ncdc.noaa.gov/stormevents/details.jsp), it was decided to extract a subset of the initial data, 1950-2011, spanning 1995-2011 and resulting in 681,500 records.  This is because from 1955 through 1992, only tornado, thunderstorm wind and hail events were keyed from the paper publications into digital data and from 1993 to 1995, only tornado, thunderstorm wind and hail events have been extracted from the Unformatted Text Files.  So, in order to analyse the most complete and unbiased data for storm events only the data from 1995-2011 was considered as it contained observations for all 48 storm weather event types.
+
+In addition, it was decided to further subset the data to include only those events that have non zero values for fatalities, injuries, property damage or crop damage.  The resulting data set contains 211,775 records.  After grouping the data by event and summarizing it was decided to remove any events with only one reported incidence in the entire date range.  This will remove outliers like Excessive Wetness that total almost $145 million in economic impact and that could further bias the analysis.  The resulting data after these steps are performed will then be plotted and analyzed further.
+
+```{r, echo=TRUE,warning=FALSE, error=FALSE}
+
+require(dplyr)
+##extract subset of storm data from 1995-2011
+storm.data <- subset(raw.storm.data, BGN_DATE >= "1995/1/1")
+
+##Verify resulting data between 1995-2011
+range(storm.data$BGN_DATE)
+
+##select the relevant columns
+storm.data <- select(storm.data, one_of(c("REFNUM","BGN_DATE", "EVTYPE","FATALITIES",
+                                          "INJURIES","PROPDMG","PROPDMGEXP","CROPDMG","CROPDMGEXP")))
+
+
+```
+
+Further subset data to contain only events with non zero values for fatalities, injuries, property damage or crop damage.
+
+```{r, echo=TRUE,warning=FALSE, error=FALSE}
+
+storm.data <- subset(storm.data, FATALITIES > 0 | INJURIES > 0 | PROPDMG > 0 | CROPDMG > 0)
+```
+*Table 1 - Summary of Storm Data*
+```{r}
+print("*Table 1 - Summary of Storm Data*")
+summary(storm.data)
+```
+Convert crop and property damage exponent values to uppercase to aid in the conversion to numeric multiplier of 1K, 1M or 1B.  NA values will be replaced with 0.  Property and crop damage values will then be multiplied by exponents.
+
+```{r, echo=TRUE,warning=FALSE, error=FALSE}
+
+##Convert EVTYPE, PROPDMGEXp and CROPDMGEXP columns to uppercase for easier replacement
+storm.data$EVTYPE <- toupper(storm.data$EVTYPE)
+storm.data$PROPDMGEXP <- toupper(storm.data$PROPDMGEXP)
+storm.data$CROPDMGEXP <- toupper(storm.data$CROPDMGEXP)
+
+##Convert exponents to numeric values for property and crop damage
+storm.data <- storm.data %>% mutate(PROPDMGEXP =  ifelse(grepl("K",PROPDMGEXP), as.numeric(10^3),
+                                                  ifelse(grepl("M",PROPDMGEXP), as.numeric(10^6),
+                                                  ifelse(grepl("B",PROPDMGEXP), as.numeric(10^9),
+                                                  0))),
+                                    CROPDMGEXP =  ifelse(grepl("K",CROPDMGEXP), as.numeric(10^3),
+                                                  ifelse(grepl("M",CROPDMGEXP), as.numeric(10^6),
+                                                  ifelse(grepl("B",CROPDMGEXP), as.numeric(10^9),
+                                                  0))))
+
+##Mulitply property and crop damage by numeric exponents grouped on unique refnum for observations
+storm.data <- storm.data %>% group_by(REFNUM) %>% mutate(TOTAL.PROPERTY = PROPDMG*PROPDMGEXP,
+                                    TOTAL.CROP = CROPDMG*CROPDMGEXP)
+```
+Convert EVTYPE to uppercase and add events with equivalent types to a new event category and group observations by the new EVENT column.
+
+There are 48 unique storm event types reported on the NOAA website.  An effort was made to align the data in the EVTYPE column with these values when possible.  This is not a perfect solution as it relies on a lot of manual string searching and replacement, but it creates better grouping of events for analysis.
+
+*Table 2 - EVTYPE to EVENT Column Mappings*
+```{r, echo=TRUE,warning=FALSE, error=FALSE}
+
+##Search and replace to consolidate EVTYPE in new EVENT column
+storm.data <- storm.data %>% mutate(EVENT = ifelse(grepl("*COLD*",EVTYPE), "COLD WEATHER", 
+      ifelse(grepl("*TSTM*",EVTYPE), "THUNDERSTORM",
+      ifelse(grepl("*HURRICANE*",EVTYPE), "HURRICANE",
+      ifelse(grepl("*SNOW*",EVTYPE), "SNOW",
+      ifelse(grepl("*WATERSPOUST*",EVTYPE), "WATERSPOUT",
+      ifelse(grepl("TROPICAL*",EVTYPE), "TROPICAL",
+      ifelse(grepl("*TORNADO*",EVTYPE), "TORNADO",
+      ifelse(grepl("*THUNDERSTORM*",EVTYPE), "THUNDERSTORM",
+      ifelse(grepl("WILD*",EVTYPE), "WILD FIRE",
+      ifelse(grepl("*FIRE*",EVTYPE), "WILD FIRE",       
+      ifelse(grepl("*WINTER*",EVTYPE), "WINTER STORM",
+      ifelse(grepl("*WINTRY*",EVTYPE), "WINTER STORM",
+      ifelse(grepl("*WIND*",EVTYPE), "WIND",
+      ifelse(grepl("MUD*",EVTYPE), "MUDSLIDE",
+      ifelse(grepl("LIGHTNING*",EVTYPE), "LIGHTNING",
+      ifelse(grepl("LIGNTNING*",EVTYPE), "LIGHTNING",
+      ifelse(grepl("LANDSLIDE*",EVTYPE), "LANDSLIDE",
+      ifelse(grepl("LANDSLUMP*",EVTYPE), "LANDSLIDE",
+      ifelse(grepl("HIGH WIND*",EVTYPE), "HIGH WIND",
+      ifelse(grepl("MARINE*",EVTYPE), "MARINE",
+      ifelse(grepl("HEAT",EVTYPE), "EXCESSIVE HEAT",
+      ifelse(grepl("RAIN",EVTYPE), "RAIN",
+      ifelse(grepl("FREEZE",EVTYPE), "ICE STORM",
+      ifelse(grepl("*FLOOD*",EVTYPE), "FLOOD",
+      ifelse(grepl("WAVE",EVTYPE), "WAVE",
+      ifelse(grepl("FLOOD",EVTYPE), "FLOOD",
+      ifelse(grepl("FLD",EVTYPE), "FLOOD",
+      ifelse(grepl("ICE",EVTYPE), "ICE STORM",
+      ifelse(grepl("ICY",EVTYPE), "ICE STORM",
+      ifelse(grepl("GLAZE",EVTYPE), "ICE STORM",
+      ifelse(grepl("HAIL",EVTYPE), "HAIL STORM",
+      ifelse(grepl("HIGH S",EVTYPE), "HIGH SURF",
+      ifelse(grepl("HIGH TIDE",EVTYPE), "HIGH SURF",
+      ifelse(grepl("*MIXED PRECIP*",EVTYPE), "MIXED PRECIPITATION",     
+      ifelse(grepl("*WARM*",EVTYPE), "EXCESSIVE HEAT", 
+      ifelse(grepl("^RIP CURRENT*",EVTYPE), "RIP CURRENTS", 
+      ifelse(grepl("^ROUGH S*",EVTYPE), "ROUGH SEAS", 
+      ifelse(grepl("^STORM*",EVTYPE), "STORM SURGE",   
+      ifelse(grepl("COASTALST",EVTYPE), "COASTAL STORM",
+      ifelse(grepl("^DAM",EVTYPE), "FLOOD",
+      ifelse(grepl("EROSION",EVTYPE), "COASTAL EROSION",
+      EVTYPE))))))))))))))))))))))))))))))))))))))))))
+storm.data <- storm.data[order(storm.data$EVENT),]
+
+##Verify EVTYPE to EVENT mapping
+unique(paste(storm.data$EVTYPE," - ",  storm.data$EVENT))
+
+```
+
+##Summing the data:
+
+Calculate total fatalities/injuries, property and crop damage for each event.
+
+```{r, echo=TRUE,warning=FALSE, error=FALSE}
+
+##Sum columns by EVENT
+event.totals <- storm.data %>% group_by(EVENT) %>% summarise(
+  TOTAL.PROPERTY = sum(TOTAL.PROPERTY),
+  TOTAL.CROP = sum(TOTAL.CROP),
+  TOTAL.ECONOMIC = sum(TOTAL.PROPERTY +  TOTAL.CROP),
+  TOTAL.HUMAN = sum(FATALITIES+INJURIES),
+  HUMAN.AVG = mean(FATALITIES+INJURIES),
+  PROPERTY.AVG = mean(PROPDMG*PROPDMGEXP),
+  CROP.AVG = mean(CROPDMG*CROPDMGEXP),
+  ECONOMIC.AVG = mean(PROPDMG*PROPDMGEXP)+mean(CROPDMG*CROPDMGEXP),
+  TOTAL.INCIDENTS = length(unique(REFNUM)))
+
+##Drop events with only 1 reported incident during 1995-2011
+##This will remove outliers like Excessive Wetness with 
+##1 reported incident totaling almost $145 million in damages
+
+event.totals <- subset(event.totals, TOTAL.INCIDENTS > 1)
+
+```
+
+Produce figures and plots to visualize analysis results and conclusions.
+
+View the Top 10 Events by Total and Average Population Health Impact.
+
+```{r, echo=TRUE,warning=FALSE, error=FALSE}
+#Group top 10 events by total population health impact
+top.health.total <- head(arrange(event.totals, desc(TOTAL.HUMAN)),10)
+```
+
+*Table 3 - Top 10 events by total population health impact*
+```{r}
+#Show top 10 events by total population health impact
+head(top.health.total[,c(1,5)], 10)
+
+#Group top 10 events by average population health impact
+top.health.avg <- head(arrange(event.totals, desc(HUMAN.AVG)),10)
+```
+*Table 4 - Top 10 events by average population health impact*
+```{r}
+#Show top 10 events by average population health impact
+head(top.health.avg[,c(1,6)], 10)
+```
+
+View the Top 10 Events by Total and Average Economic Impact.
+
+```{r, echo=TRUE,warning=FALSE, error=FALSE}
+
+##Group top events for economic impact, total property + total crop damage
+top.economic.total <- head(arrange(event.totals, desc(TOTAL.ECONOMIC)), 10)
+#Show in Billions
+top.economic.total$TOTAL.ECONOMIC <- (round(top.economic.total$TOTAL.ECONOMIC/10^9, 3))
+
+```
+*Table 5 - Top 10 events by total economic impact in billions $*
+```{r}
+#Show top 10 events by total economic impact in billions $
+head(top.economic.total[,c(1,4)],10)
+
+#Group top 10 events by average economic impact in millions $
+top.economic.avg <- head(arrange(event.totals, desc(ECONOMIC.AVG)),10)
+#Show in Millions
+top.economic.avg$ECONOMIC.AVG <- (round(top.economic.avg$ECONOMIC.AVG/10^6, 3))
+
+```
+*Table 6 - Top 10 events by average economic impact in millions $*
+```{r}
+#Show top 10 events by average economic impact in millions $
+head(top.economic.avg[,c(1,9)], 10)
+```
+
+Plot top events by population health and economic impact.
+
+```{r,echo=TRUE,warning=FALSE, error=FALSE, fig.width=10, fig.height=10}
+require(ggplot2)
+top.health.total.p <- ggplot(top.health.total, aes(x=EVENT, y=TOTAL.HUMAN)) + 
+  geom_bar(stat="identity",fill="#FF2400", color="black") +
+  scale_x_discrete(limits=top.health.total$EVENT) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  xlab("Storm Event Type") +
+  ylab("Total Fatalities/Injuries in Thousands") +
+  ggtitle("Top 10 Storm Events Impacting Population Health\n between 1995-2011")
+# print(top.health.total.p)
+
+top.economic.total.p <- ggplot(top.economic.total, aes(x=EVENT, y=TOTAL.ECONOMIC)) + 
+  geom_bar(stat="identity",fill="#FF2400", color="black") +
+  scale_x_discrete(limits=top.economic.total$EVENT) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  xlab("Storm Event Type") +
+  ylab("Total Economic Impact in $Billions") +
+  ggtitle("Top 10 Storm Events by Economic Impact\n between 1995-2011")
+# print(top.economic.total.p)
+
+top.health.avg.p <- ggplot(top.health.avg, aes(x=EVENT, y=HUMAN.AVG)) + 
+  geom_bar(stat="identity",fill="#FF2400", color="black") +
+  scale_x_discrete(limits=top.health.avg$EVENT) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  xlab("Storm Event Type") +
+  ylab("Average Fatalities/Injuries") +
+  ggtitle("Top 10 Storm Events by Average Population Health\nImpact between 1995-2011")
+# print(top.health.avg.p)
+
+top.economic.avg.p <- ggplot(top.economic.avg, aes(x=EVENT, y=ECONOMIC.AVG)) + 
+  geom_bar(stat="identity",fill="#FF2400", color="black") +
+  scale_x_discrete(limits=top.economic.avg$EVENT) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  xlab("Storm Event Type") +
+  ylab("Average Economic Impact in $Millions") +
+  ggtitle("Top 10 Storm Events by Average Economic Impact\n between 1995-2011")
+# print(top.economic.avg.p)
+
+#Install multiplot function
+# Multiple plot function
+#
+# ggplot objects can be passed in ..., or to plotlist (as a list of ggplot objects)
+# - cols:   Number of columns in layout
+# - layout: A matrix specifying the layout. If present, 'cols' is ignored.
+#
+# If the layout is something like matrix(c(1,2,3,3), nrow=2, byrow=TRUE),
+# then plot 1 will go in the upper left, 2 will go in the upper right, and
+# 3 will go all the way across the bottom.
+#
+multiplot <- function(..., plotlist=NULL, file, cols=1, layout=NULL) {
+  library(grid)
+  
+  # Make a list from the ... arguments and plotlist
+  plots <- c(list(...), plotlist)
+  
+  numPlots = length(plots)
+  
+  # If layout is NULL, then use 'cols' to determine layout
+  if (is.null(layout)) {
+    # Make the panel
+    # ncol: Number of columns of plots
+    # nrow: Number of rows needed, calculated from # of cols
+    layout <- matrix(seq(1, cols * ceiling(numPlots/cols)),
+                     ncol = cols, nrow = ceiling(numPlots/cols))
+  }
+  
+  if (numPlots==1) {
+    print(plots[[1]])
+    
+  } else {
+    # Set up the page
+    grid.newpage()
+    pushViewport(viewport(layout = grid.layout(nrow(layout), ncol(layout))))
+    
+    # Make each plot, in the correct location
+    for (i in 1:numPlots) {
+      # Get the i,j matrix positions of the regions that contain this subplot
+      matchidx <- as.data.frame(which(layout == i, arr.ind = TRUE))
+      
+      print(plots[[i]], vp = viewport(layout.pos.row = matchidx$row,
+                                      layout.pos.col = matchidx$col))
+    }
+  }
+}
+
+#Plot all 4 plots in one multiplot to show total and average health and economic impact by storm event
+```
+*Figure 1 - Plots Showing Top 10 Events by Total and Average Impact on Population Health and Economic Consequences 1995-2011*
+
+```{r,echo=TRUE,warning=FALSE, error=FALSE, fig.width=10, fig.height=10}
+require(ggplot2)
+multiplot(top.health.total.p, top.health.avg.p, top.economic.total.p, top.economic.avg.p, cols=2)
+
+```
+
+##Results:
+
+After loading and cleaning the data and consolidating the event types for the years 1995-2011 it was found that Tornadoes are the storm event with the highest total impact on population health with 23,332 fatalities and injuries combined between 1995 and 2011.  The storm event with the highest total economic impact was Flooding with $167 Billion reported in damages.  Analysis of the average health and economic impact yielded a different set of results with Excessive Heat causing on average 12 combined fatalities or injuries and Hurricanes causing on average $400 million dollars in economic damages to property and crops.  
+
+In summary, it seems possible to state that Heat and Hurricane events have a more damaging effect on a per event basis and that Tornadoes and Floods have a larger cumulative effect due in part to being more numerous over time, or at least being represented more often in the above data set.
+
+A separate analysis of the full data set from 1950-2011 was also conducted and showed similar results at the top of each of the categories shown in the plots above.  In fact, the impact of Floods and Tornadoes was increased in relation to the other events due to the lack of reported incidents before 1992-1995 for most other weather events as referenced above.  The entire chunk of R code needed to replicate this analysis in included at the bottom of this document.
+
+Interestingly, these totals do not agree with the current set of data available on the NOAA website, [URL](https://www.ncdc.noaa.gov/billions/events).  For a similar period the website reports that Hurricanes far outweigh Tornadoes in population health and economic impact.  This could indicate that the data set used for this assessment is either incomplete or in some cases inaccurate.  For instance, Hurricane Katrina alone is reported online as being responsible for 1,833 fatalities and $151 billion in economic impact while the total population health impact for all hurricanes in the data analysed above comes to only 1,462 with a total economic impact of $90 billion.         
+
+*See below for analysis of full data set containing all reported weather event incidents between 1950-2011*
+
+```{r,echo=TRUE,warning=FALSE, error=FALSE, fig.width=10, fig.height=10}
+#Conduct similar analysis on full data set for incidents reported between 1950-2011
+#Select all data to conduct control comparison with subsetted data
+storm.data <- raw.storm.data
+##Convert exponents to numeric values for property and crop damage
+storm.data$EVTYPE <- toupper(storm.data$EVTYPE)
+storm.data$PROPDMGEXP <- toupper(storm.data$PROPDMGEXP)
+storm.data$CROPDMGEXP <- toupper(storm.data$CROPDMGEXP)
+##Convert exponents to numeric values for property and crop damage
+storm.data <- storm.data %>% mutate(PROPDMGEXP =  ifelse(grepl("K",PROPDMGEXP), as.numeric(10^3),
+                                                         ifelse(grepl("M",PROPDMGEXP), as.numeric(10^6),
+                                                                ifelse(grepl("B",PROPDMGEXP), as.numeric(10^9),
+                                                                       0))),
+                                    CROPDMGEXP =  ifelse(grepl("K",CROPDMGEXP), as.numeric(10^3),
+                                                         ifelse(grepl("M",CROPDMGEXP), as.numeric(10^6),
+                                                                ifelse(grepl("B",CROPDMGEXP), as.numeric(10^9),
+                                                                       0))))
+
+##Mulitply property and crop damage by numeric exponents grouped on unique refnum for observations
+storm.data <- storm.data %>% group_by(REFNUM) %>% mutate(TOTAL.PROPERTY = PROPDMG*PROPDMGEXP,
+                                                         TOTAL.CROP = CROPDMG*CROPDMGEXP)
+
+
+storm.data <- storm.data %>% mutate(EVENT = ifelse(grepl("*COLD*",EVTYPE), "COLD WEATHER", 
+      ifelse(grepl("*TSTM*",EVTYPE), "THUNDERSTORM",
+      ifelse(grepl("*HURRICANE*",EVTYPE), "HURRICANE",
+      ifelse(grepl("*SNOW*",EVTYPE), "SNOW",
+      ifelse(grepl("*WATERSPOUST*",EVTYPE), "WATERSPOUT",
+      ifelse(grepl("TROPICAL*",EVTYPE), "TROPICAL",
+      ifelse(grepl("*TORNADO*",EVTYPE), "TORNADO",
+      ifelse(grepl("*THUNDERSTORM*",EVTYPE), "THUNDERSTORM",
+      ifelse(grepl("WILD*",EVTYPE), "WILD FIRE",
+      ifelse(grepl("*FIRE*",EVTYPE), "WILD FIRE",       
+      ifelse(grepl("*WINTER*",EVTYPE), "WINTER STORM",
+      ifelse(grepl("*WINTRY*",EVTYPE), "WINTER STORM",
+      ifelse(grepl("*WIND*",EVTYPE), "WIND",
+      ifelse(grepl("MUD*",EVTYPE), "MUDSLIDE",
+      ifelse(grepl("LIGHTNING*",EVTYPE), "LIGHTNING",
+      ifelse(grepl("LIGNTNING*",EVTYPE), "LIGHTNING",
+      ifelse(grepl("LANDSLIDE*",EVTYPE), "LANDSLIDE",
+      ifelse(grepl("LANDSLUMP*",EVTYPE), "LANDSLIDE",
+      ifelse(grepl("HIGH WIND*",EVTYPE), "HIGH WIND",
+      ifelse(grepl("MARINE*",EVTYPE), "MARINE",
+      ifelse(grepl("HEAT",EVTYPE), "EXCESSIVE HEAT",
+      ifelse(grepl("RAIN",EVTYPE), "RAIN",
+      ifelse(grepl("FREEZE",EVTYPE), "ICE STORM",
+      ifelse(grepl("*FLOOD*",EVTYPE), "FLOOD",
+      ifelse(grepl("WAVE",EVTYPE), "WAVE",
+      ifelse(grepl("FLOOD",EVTYPE), "FLOOD",
+      ifelse(grepl("FLD",EVTYPE), "FLOOD",
+      ifelse(grepl("ICE",EVTYPE), "ICE STORM",
+      ifelse(grepl("ICY",EVTYPE), "ICE STORM",
+      ifelse(grepl("GLAZE",EVTYPE), "ICE STORM",
+      ifelse(grepl("HAIL",EVTYPE), "HAIL STORM",
+      ifelse(grepl("HIGH S",EVTYPE), "HIGH SURF",
+      ifelse(grepl("HIGH TIDE",EVTYPE), "HIGH SURF",
+      ifelse(grepl("*MIXED PRECIP*",EVTYPE), "MIXED PRECIPITATION",     
+      ifelse(grepl("*WARM*",EVTYPE), "EXCESSIVE HEAT", 
+      ifelse(grepl("^RIP CURRENT*",EVTYPE), "RIP CURRENTS", 
+      ifelse(grepl("^ROUGH S*",EVTYPE), "ROUGH SEAS", 
+      ifelse(grepl("^STORM*",EVTYPE), "STORM SURGE",   
+      ifelse(grepl("COASTALST",EVTYPE), "COASTAL STORM",
+      ifelse(grepl("^DAM",EVTYPE), "FLOOD",
+      ifelse(grepl("EROSION",EVTYPE), "COASTAL EROSION",
+      EVTYPE))))))))))))))))))))))))))))))))))))))))))
+
+storm.data <- storm.data[order(storm.data$EVENT),]
+
+##Verify EVTYPE to EVENT mapping
+unique(paste(storm.data$EVTYPE," - ",  storm.data$EVENT))
+
+options(scipen=999999999)
+
+##Sum columns by EVENT
+event.totals <- storm.data %>% group_by(EVENT) %>% summarise(
+  TOTAL.PROPERTY = sum(TOTAL.PROPERTY),
+  TOTAL.CROP = sum(TOTAL.CROP),
+  TOTAL.ECONOMIC = sum(TOTAL.PROPERTY +  TOTAL.CROP),
+  TOTAL.HUMAN = sum(FATALITIES+INJURIES),
+  HUMAN.AVG = mean(FATALITIES+INJURIES),
+  PROPERTY.AVG = mean(PROPDMG*PROPDMGEXP),
+  CROP.AVG = mean(CROPDMG*CROPDMGEXP),
+  ECONOMIC.AVG = mean(PROPDMG*PROPDMGEXP)+mean(CROPDMG*CROPDMGEXP),
+  TOTAL.INCIDENTS = length(unique(REFNUM)))
+
+summary(event.totals)
+
+#Group top 10 events by total population health impact
+top.health.total <- head(arrange(event.totals, desc(TOTAL.HUMAN)),10)
+
+#Show top 10 events by total population health impact
+head(top.health.total[,c(1,5)], 10)
+
+#Group top 10 events by average population health impact
+top.health.avg <- head(arrange(event.totals, desc(HUMAN.AVG)),10)
+
+#Show top 10 events by average population health impact
+head(top.health.avg[,c(1,6)], 10)
+
+##Group top events for economic impact, total property + total crop damage
+top.economic.total <- head(arrange(event.totals, desc(TOTAL.ECONOMIC)), 10)
+
+#Group top 10 events by total economic impact in billions $
+top.economic.total$TOTAL.ECONOMIC <- (round(top.economic.total$TOTAL.ECONOMIC/10^9, 3))
+
+#Show top 10 events by total economic impact in billions $
+head(top.economic.total[,c(1,4)],10)
+
+#Group top 10 events by average economic impact in millions $
+top.economic.avg <- head(arrange(event.totals, desc(ECONOMIC.AVG)),10)
+
+top.economic.avg$ECONOMIC.AVG <- (round(top.economic.avg$ECONOMIC.AVG/10^6, 3))
+
+
+#Show top 10 events by average economic impact in millions $
+head(top.economic.avg[,c(1,9)], 10)
+
+top.health.total.p <- ggplot(top.health.total, aes(x=EVENT, y=TOTAL.HUMAN)) + 
+  geom_bar(stat="identity",fill="#FF2400", color="black") +
+  scale_x_discrete(limits=top.health.total$EVENT) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  xlab("Storm Event Type") +
+  ylab("Total Fatalities/Injuries in Thousands") +
+  ggtitle("Top 10 Storm Events Impacting Population Health\n between 1950-2011")
+
+top.economic.total.p <- ggplot(top.economic.total, aes(x=EVENT, y=TOTAL.ECONOMIC)) + 
+  geom_bar(stat="identity",fill="#FF2400", color="black") +
+  scale_x_discrete(limits=top.economic.total$EVENT) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  xlab("Storm Event Type") +
+  ylab("Total Economic Impact in $Billions") +
+  ggtitle("Top 10 Storm Events by Economic Impact\n between 1950-2011")
+
+top.health.avg.p <- ggplot(top.health.avg, aes(x=EVENT, y=HUMAN.AVG)) + 
+  geom_bar(stat="identity",fill="#FF2400", color="black") +
+  scale_x_discrete(limits=top.health.avg$EVENT) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  xlab("Storm Event Type") +
+  ylab("Average Fatalities/Injuries") +
+  ggtitle("Top 10 Storm Events Impacting Population Health\n between 1950-2011")
+
+top.economic.avg.p <- ggplot(top.economic.avg, aes(x=EVENT, y=ECONOMIC.AVG)) + 
+  geom_bar(stat="identity",fill="#FF2400", color="black") +
+  scale_x_discrete(limits=top.economic.avg$EVENT) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  xlab("Storm Event Type") +
+  ylab("Average Economic Impact in $Millions") +
+  ggtitle("Top 10 Storm Events by Average Economic Impact\n between 1950-2011")
+
+#Plot all 4 plots in one multiplot to show total and average health and economic impact by storm event
+```
+*Figure 2 - Plots Showing Top 10 Events by Total and Average Impact on Population Health and Economic Consequences 1950-2011*
+```{r,echo=TRUE,warning=FALSE, error=FALSE, fig.width=10.5, fig.height=10}
+require(ggplot2)
+multiplot(top.health.total.p, top.health.avg.p, top.economic.total.p, top.economic.avg.p, cols=2)
+
+```
+                                                                                                                                                
