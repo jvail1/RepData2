@@ -79,7 +79,6 @@ storm.data <- subset(storm.data, FATALITIES > 0 | INJURIES > 0 | PROPDMG > 0 | C
 ```
 *Table 1 - Summary of Storm Data*
 ```{r}
-print("*Table 1 - Summary of Storm Data*")
 summary(storm.data)
 ```
 Convert crop and property damage exponent values to uppercase to aid in the conversion to numeric multiplier of 1K, 1M or 1B.  NA values will be replaced with 0.  Property and crop damage values will then be multiplied by exponents.
